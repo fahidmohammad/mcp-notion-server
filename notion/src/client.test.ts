@@ -1,6 +1,7 @@
 import { expect, test, describe, vi, beforeEach } from "vitest";
 import { NotionClientWrapper } from "./index.js";
 import { PageResponse } from "./types/index.js";
+import { NotionCache } from "./cache/index.js";
 
 vi.mock("./markdown/index.js", () => ({
   convertToMarkdown: vi.fn().mockReturnValue("# Test"),
@@ -10,13 +11,17 @@ global.fetch = vi.fn();
 
 describe("NotionClientWrapper", () => {
   let wrapper: any;
+  let mockCache: NotionCache;
 
   beforeEach(() => {
     // Reset mocks
     vi.resetAllMocks();
 
-    // Create client wrapper with test token
-    wrapper = new NotionClientWrapper("test-token");
+    // Create mock cache
+    mockCache = new NotionCache({ ttl: 60 });
+
+    // Create client wrapper with test token and mock cache
+    wrapper = new NotionClientWrapper("test-token", mockCache);
 
     // Mock fetch to return JSON
     (global.fetch as any).mockImplementation(() =>
@@ -32,6 +37,107 @@ describe("NotionClientWrapper", () => {
       "Content-Type": "application/json",
       "Notion-Version": "2022-06-28",
     });
+  });
+
+  test("should use cache for retrievePage when enabled", async () => {
+    const pageId = "page123";
+    const mockResponse = { id: pageId, title: "Test Page" };
+
+    // First call should hit the API
+    (global.fetch as any).mockImplementationOnce(() =>
+      Promise.resolve({
+        json: () => Promise.resolve(mockResponse),
+      })
+    );
+
+    const response1 = await wrapper.retrievePage(pageId, true);
+    expect(response1).toEqual(mockResponse);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+
+    // Second call should use cache
+    const response2 = await wrapper.retrievePage(pageId, true);
+    expect(response2).toEqual(mockResponse);
+    expect(global.fetch).toHaveBeenCalledTimes(1); // Still 1 call
+  });
+
+  test("should bypass cache for retrievePage when disabled", async () => {
+    const pageId = "page123";
+    const mockResponse = { id: pageId, title: "Test Page" };
+
+    // Both calls should hit the API
+    (global.fetch as any).mockImplementation(() =>
+      Promise.resolve({
+        json: () => Promise.resolve(mockResponse),
+      })
+    );
+
+    const response1 = await wrapper.retrievePage(pageId, false);
+    const response2 = await wrapper.retrievePage(pageId, false);
+
+    expect(response1).toEqual(mockResponse);
+    expect(response2).toEqual(mockResponse);
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  test("should invalidate cache on updatePageProperties", async () => {
+    const pageId = "page123";
+    const mockResponse = { id: pageId, title: "Test Page" };
+
+    // Mock API responses
+    (global.fetch as any).mockImplementation(() =>
+      Promise.resolve({
+        json: () => Promise.resolve(mockResponse),
+      })
+    );
+
+    // First retrieve and cache
+    await wrapper.retrievePage(pageId, true);
+    expect(mockCache.get(`page_${pageId}`)).toBeTruthy();
+
+    // Update properties
+    await wrapper.updatePageProperties(pageId, { title: "New Title" });
+    expect(mockCache.get(`page_${pageId}`)).toBeNull();
+  });
+
+  test("should use cache for retrieveDatabase when enabled", async () => {
+    const dbId = "db123";
+    const mockResponse = { id: dbId, title: "Test DB" };
+
+    // First call should hit the API
+    (global.fetch as any).mockImplementationOnce(() =>
+      Promise.resolve({
+        json: () => Promise.resolve(mockResponse),
+      })
+    );
+
+    const response1 = await wrapper.retrieveDatabase(dbId, true);
+    expect(response1).toEqual(mockResponse);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+
+    // Second call should use cache
+    const response2 = await wrapper.retrieveDatabase(dbId, true);
+    expect(response2).toEqual(mockResponse);
+    expect(global.fetch).toHaveBeenCalledTimes(1); // Still 1 call
+  });
+
+  test("should invalidate cache on updateDatabase", async () => {
+    const dbId = "db123";
+    const mockResponse = { id: dbId, title: "Test DB" };
+
+    // Mock API responses
+    (global.fetch as any).mockImplementation(() =>
+      Promise.resolve({
+        json: () => Promise.resolve(mockResponse),
+      })
+    );
+
+    // First retrieve and cache
+    await wrapper.retrieveDatabase(dbId, true);
+    expect(mockCache.get(`database_${dbId}`)).toBeTruthy();
+
+    // Update database
+    await wrapper.updateDatabase(dbId, [{ text: { content: "New Title" } }]);
+    expect(mockCache.get(`database_${dbId}`)).toBeNull();
   });
 
   test("should call appendBlockChildren with correct parameters", async () => {

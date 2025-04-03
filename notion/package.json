@@ -1,6 +1,6 @@
 {
   "name": "@suekou/mcp-notion-server",
-  "version": "1.1.1",
+  "version": "1.1.0",
   "description": "MCP server for interacting with Notion API based on Node",
   "license": "MIT",
   "author": "Kosuke Suenaga (https://github.com/suekou/mcp-notion-server)",
@@ -15,19 +15,26 @@
     "notion"
   ],
   "scripts": {
-    "build": "tsc && node -e \"require('fs').chmodSync('build/index.js', '755')\"",
+    "build": "tsc && cp polyfill.js build/ && node -e \"require('fs').chmodSync('build/index.js', '755')\"",
     "prepare": "npm run build",
     "watch": "tsc --watch",
     "inspector": "npx @modelcontextprotocol/inspector build/index.js",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "start": "node --require ./polyfill.js build/index.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.7.0",
-    "vitest": "3.0.9"
+    "node-fetch": "2",
+    "undici": "^7.6.0",
+    "vitest": "3.0.9",
+    "web-streams-polyfill": "^4.1.0"
   },
   "devDependencies": {
     "@types/node": "^20.11.24",
+    "@types/node-fetch": "2",
+    "dotenv": "^16.4.7",
+    "tsx": "^4.19.3",
     "typescript": "^5.3.3"
   }
 }

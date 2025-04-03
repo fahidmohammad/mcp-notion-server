@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+
 /**
  * All API endpoints support both JSON and Markdown response formats.
  * Set the "format" parameter to "json" or "markdown" (default is "markdown").
@@ -11,6 +12,7 @@
  *   experimental Markdown conversion. If not set or set to any other value,
  *   all responses will be in JSON format regardless of the "format" parameter.
  */
+import dotenv from 'dotenv';
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -30,6 +32,13 @@ import {
   CommentResponse,
   RichTextItemResponse,
 } from "./types/index.js";
+import { defaultCache } from "./cache/index.js";
+
+// Use node-fetch instead of undici
+import fetch from 'node-fetch';
+
+// Load environment variables from .env file
+dotenv.config();
 
 // Type definitions for tool arguments
 // Blocks
@@ -43,6 +52,7 @@ interface AppendBlockChildrenArgs {
 interface RetrieveBlockArgs {
   block_id: string;
   format?: "json" | "markdown";
+  cache?: boolean;
 }
 
 interface RetrieveBlockChildrenArgs {
@@ -61,6 +71,7 @@ interface DeleteBlockArgs {
 interface RetrievePageArgs {
   page_id: string;
   format?: "json" | "markdown";
+  cache?: boolean;
 }
 
 interface UpdatePagePropertiesArgs {
@@ -79,6 +90,7 @@ interface ListAllUsersArgs {
 interface RetrieveUserArgs {
   user_id: string;
   format?: "json" | "markdown";
+  cache?: boolean;
 }
 
 interface RetrieveBotUserArgs {
@@ -115,6 +127,7 @@ interface QueryDatabaseArgs {
 interface RetrieveDatabaseArgs {
   database_id: string;
   format?: "json" | "markdown";
+  cache?: boolean;
 }
 
 interface UpdateDatabaseArgs {
@@ -171,6 +184,13 @@ const formatParameter = {
   description:
     "Specify the response format. 'json' returns the original data structure, 'markdown' returns a more readable format. Use 'markdown' when the user only needs to read the page and isn't planning to write or modify it. Use 'json' when the user needs to read the page with the intention of writing to or modifying it.",
   default: "markdown",
+};
+
+// Add cache parameter to common schema
+const cacheParameter = {
+  type: "boolean",
+  description: "Whether to use cached response if available. Defaults to true.",
+  default: true,
 };
 
 // common object schema
@@ -492,6 +512,7 @@ const retrieveBlockTool: Tool = {
         description: "The ID of the block to retrieve." + commonIdDescription,
       },
       format: formatParameter,
+      cache: cacheParameter,
     },
     required: ["block_id"],
   },
@@ -537,26 +558,6 @@ const deleteBlockTool: Tool = {
   },
 };
 
-const updateBlockTool: Tool = {
-  name: "notion_update_block",
-  description: "Update the content of a block in Notion based on its type. The update replaces the entire value for a given field.",
-  inputSchema: {
-    type: "object",
-    properties: {
-      block_id: {
-        type: "string",
-        description: "The ID of the block to update." + commonIdDescription,
-      },
-      block: {
-        type: "object",
-        description: "The updated content for the block. Must match the block's type schema.",
-      },
-      format: formatParameter,
-    },
-    required: ["block_id", "block"],
-  },
-};
-
 // Pages
 const retrievePageTool: Tool = {
   name: "notion_retrieve_page",
@@ -569,6 +570,7 @@ const retrievePageTool: Tool = {
         description: "The ID of the page to retrieve." + commonIdDescription,
       },
       format: formatParameter,
+      cache: cacheParameter,
     },
     required: ["page_id"],
   },
@@ -630,6 +632,7 @@ const retrieveUserTool: Tool = {
         description: "The ID of the user to retrieve." + commonIdDescription,
       },
       format: formatParameter,
+      cache: cacheParameter,
     },
     required: ["user_id"],
   },
@@ -720,10 +723,10 @@ const retrieveDatabaseTool: Tool = {
     properties: {
       database_id: {
         type: "string",
-        description:
-          "The ID of the database to retrieve." + commonIdDescription,
+        description: "The ID of the database to retrieve." + commonIdDescription,
       },
       format: formatParameter,
+      cache: cacheParameter,
     },
     required: ["database_id"],
   },
@@ -905,9 +908,11 @@ export class NotionClientWrapper {
   private notionToken: string;
   private baseUrl: string = "https://api.notion.com/v1";
   private headers: { [key: string]: string };
+  private cache: typeof defaultCache;
 
-  constructor(token: string) {
+  constructor(token: string, cache = defaultCache) {
     this.notionToken = token;
+    this.cache = cache;
     this.headers = {
       Authorization: `Bearer ${this.notionToken}`,
       "Content-Type": "application/json",
@@ -930,16 +935,24 @@ export class NotionClientWrapper {
       }
     );
 
-    return response.json();
+    return response.json() as Promise<BlockResponse>;
   }
 
-  async retrieveBlock(block_id: string): Promise<BlockResponse> {
+  async retrieveBlock(block_id: string, useCache: boolean = true): Promise<BlockResponse> {
+    const cacheKey = `block_${block_id}`;
+    if (useCache) {
+      const cached = this.cache.get<BlockResponse>(cacheKey);
+      if (cached) return cached;
+    }
+
     const response = await fetch(`${this.baseUrl}/blocks/${block_id}`, {
       method: "GET",
       headers: this.headers,
     });
 
-    return response.json();
+    const data = await response.json() as BlockResponse;
+    if (useCache) this.cache.set(cacheKey, data);
+    return data;
   }
 
   async retrieveBlockChildren(
@@ -959,7 +972,7 @@ export class NotionClientWrapper {
       }
     );
 
-    return response.json();
+    return response.json() as Promise<ListResponse>;
   }
 
   async deleteBlock(block_id: string): Promise<BlockResponse> {
@@ -968,41 +981,40 @@ export class NotionClientWrapper {
       headers: this.headers,
     });
 
-    return response.json();
+    return response.json() as Promise<BlockResponse>;
   }
 
-  async updateBlock(block_id: string, block: Partial<BlockResponse>): Promise<BlockResponse> {
-    const response = await fetch(`${this.baseUrl}/blocks/${block_id}`, {
-      method: "PATCH",
-      headers: this.headers,
-      body: JSON.stringify(block),
-    });
+  async retrievePage(page_id: string, useCache: boolean = true): Promise<PageResponse> {
+    const cacheKey = `page_${page_id}`;
+    if (useCache) {
+      const cached = this.cache.get<PageResponse>(cacheKey);
+      if (cached) return cached;
+    }
 
-    return response.json();
-  }
-
-  async retrievePage(page_id: string): Promise<PageResponse> {
     const response = await fetch(`${this.baseUrl}/pages/${page_id}`, {
       method: "GET",
       headers: this.headers,
     });
 
-    return response.json();
+    const data = await response.json() as PageResponse;
+    if (useCache) this.cache.set(cacheKey, data);
+    return data;
   }
 
   async updatePageProperties(
     page_id: string,
     properties: Record<string, any>
   ): Promise<PageResponse> {
-    const body = { properties };
-
     const response = await fetch(`${this.baseUrl}/pages/${page_id}`, {
       method: "PATCH",
       headers: this.headers,
-      body: JSON.stringify(body),
+      body: JSON.stringify({ properties }),
     });
 
-    return response.json();
+    const data = await response.json() as PageResponse;
+    // Invalidate cache for this page
+    this.cache.delete(`page_${page_id}`);
+    return data;
   }
 
   async listAllUsers(
@@ -1017,15 +1029,24 @@ export class NotionClientWrapper {
       method: "GET",
       headers: this.headers,
     });
-    return response.json();
+    return response.json() as Promise<ListResponse>;
   }
 
-  async retrieveUser(user_id: string): Promise<UserResponse> {
+  async retrieveUser(user_id: string, useCache: boolean = true): Promise<UserResponse> {
+    const cacheKey = `user_${user_id}`;
+    if (useCache) {
+      const cached = this.cache.get<UserResponse>(cacheKey);
+      if (cached) return cached;
+    }
+
     const response = await fetch(`${this.baseUrl}/users/${user_id}`, {
       method: "GET",
       headers: this.headers,
     });
-    return response.json();
+
+    const data = await response.json() as UserResponse;
+    if (useCache) this.cache.set(cacheKey, data);
+    return data;
   }
 
   async retrieveBotUser(): Promise<UserResponse> {
@@ -1033,7 +1054,7 @@ export class NotionClientWrapper {
       method: "GET",
       headers: this.headers,
     });
-    return response.json();
+    return response.json() as Promise<UserResponse>;
   }
 
   async createDatabase(
@@ -1049,7 +1070,7 @@ export class NotionClientWrapper {
       body: JSON.stringify(body),
     });
 
-    return response.json();
+    return response.json() as Promise<DatabaseResponse>;
   }
 
   async queryDatabase(
@@ -1078,16 +1099,24 @@ export class NotionClientWrapper {
       }
     );
 
-    return response.json();
+    return response.json() as Promise<ListResponse>;
   }
 
-  async retrieveDatabase(database_id: string): Promise<DatabaseResponse> {
+  async retrieveDatabase(database_id: string, useCache: boolean = true): Promise<DatabaseResponse> {
+    const cacheKey = `database_${database_id}`;
+    if (useCache) {
+      const cached = this.cache.get<DatabaseResponse>(cacheKey);
+      if (cached) return cached;
+    }
+
     const response = await fetch(`${this.baseUrl}/databases/${database_id}`, {
       method: "GET",
       headers: this.headers,
     });
 
-    return response.json();
+    const data = await response.json() as DatabaseResponse;
+    if (useCache) this.cache.set(cacheKey, data);
+    return data;
   }
 
   async updateDatabase(
@@ -1107,7 +1136,10 @@ export class NotionClientWrapper {
       body: JSON.stringify(body),
     });
 
-    return response.json();
+    const data = await response.json() as DatabaseResponse;
+    // Invalidate cache for this database
+    this.cache.delete(`database_${database_id}`);
+    return data;
   }
 
   async createDatabaseItem(
@@ -1125,7 +1157,7 @@ export class NotionClientWrapper {
       body: JSON.stringify(body),
     });
 
-    return response.json();
+    return response.json() as Promise<PageResponse>;
   }
 
   async createComment(
@@ -1147,7 +1179,7 @@ export class NotionClientWrapper {
       body: JSON.stringify(body),
     });
 
-    return response.json();
+    return response.json() as Promise<CommentResponse>;
   }
 
   async retrieveComments(
@@ -1168,7 +1200,7 @@ export class NotionClientWrapper {
       }
     );
 
-    return response.json();
+    return response.json() as Promise<ListResponse>;
   }
 
   async search(
@@ -1194,7 +1226,7 @@ export class NotionClientWrapper {
       body: JSON.stringify(body),
     });
 
-    return response.json();
+    return response.json() as Promise<ListResponse>;
   }
 
   async toMarkdown(response: NotionResponse): Promise<string> {
@@ -1266,7 +1298,10 @@ async function main() {
             if (!args.block_id) {
               throw new Error("Missing required argument: block_id");
             }
-            response = await notionClient.retrieveBlock(args.block_id);
+            response = await notionClient.retrieveBlock(
+              args.block_id,
+              args.cache
+            );
             break;
           }
 
@@ -1293,25 +1328,16 @@ async function main() {
             break;
           }
 
-          case "notion_update_block": {
-            const args = request.params.arguments as unknown as {
-              block_id: string;
-              block: Partial<BlockResponse>;
-            };
-            if (!args.block_id || !args.block) {
-              throw new Error("Missing required arguments: block_id and block");
-            }
-            response = await notionClient.updateBlock(args.block_id, args.block);
-            break;
-          }
-
           case "notion_retrieve_page": {
             const args = request.params
               .arguments as unknown as RetrievePageArgs;
             if (!args.page_id) {
               throw new Error("Missing required argument: page_id");
             }
-            response = await notionClient.retrievePage(args.page_id);
+            response = await notionClient.retrievePage(
+              args.page_id,
+              args.cache
+            );
             break;
           }
 
@@ -1346,7 +1372,10 @@ async function main() {
             if (!args.user_id) {
               throw new Error("Missing required argument: user_id");
             }
-            response = await notionClient.retrieveUser(args.user_id);
+            response = await notionClient.retrieveUser(
+              args.user_id,
+              args.cache
+            );
             break;
           }
 
@@ -1385,7 +1414,10 @@ async function main() {
           case "notion_retrieve_database": {
             const args = request.params
               .arguments as unknown as RetrieveDatabaseArgs;
-            response = await notionClient.retrieveDatabase(args.database_id);
+            response = await notionClient.retrieveDatabase(
+              args.database_id,
+              args.cache
+            );
             break;
           }
 
@@ -1498,7 +1530,6 @@ async function main() {
         retrieveBlockTool,
         retrieveBlockChildrenTool,
         deleteBlockTool,
-        updateBlockTool,
         retrievePageTool,
         updatePagePropertiesTool,
         listAllUsersTool,
